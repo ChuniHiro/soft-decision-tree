@@ -12,8 +12,28 @@ from torch.autograd import Variable
 class InnerNode():
 
     def __init__(self, depth, args):
+        # print(args.hidden_size)
         self.args = args
-        self.fc = nn.Linear(self.args.input_dim, 1)
+        self._hidden_size = self.args.hidden_size
+        # self.fc = nn.Linear(self.args.input_dim, 1)
+        # self._net = nn.Sequential(
+        #         nn.Linear(self.args.input_dim, self._hidden_size),
+        #         nn.ReLU(),
+        #         nn.Linear(self._hidden_size, 1),
+        #     )
+        if self.args.linear:
+            
+            self._net = nn.Linear(self.args.input_dim, 1)
+            
+        else:
+            
+            self._net = nn.Sequential(
+                nn.Linear(self.args.input_dim, self._hidden_size[0]),
+                nn.ReLU(),
+                nn.Linear(self._hidden_size[0], self._hidden_size[1]),
+                nn.ReLU(),
+                nn.Linear(self._hidden_size[1], 1),
+            )
         beta = torch.randn(1)
         #beta = beta.expand((self.args.batch_size, 1))
         if self.args.cuda:
@@ -41,7 +61,10 @@ class InnerNode():
             self.right = LeafNode(self.args)
 
     def forward(self, x):
-        return(F.sigmoid(self.beta*self.fc(x)))
+        
+        # return(F.sigmoid(self.beta*self.fc(x)))
+        return(F.sigmoid(self.beta*self._net(x)))
+        # return(F.sigmoid(self._net(x)))
     
     def select_next(self, x):
         prob = self.forward(x)
@@ -79,15 +102,20 @@ class LeafNode():
         self.param = nn.Parameter(self.param)
         self.leaf = True
         self.softmax = nn.Softmax()
+        self.fc = nn.Linear(self.args.input_dim, self.args.output_dim)
+        # self._net.to(self.args.device)
 
-    def forward(self):
+    def forward(self, x):
+        
         return(self.softmax(self.param.view(1,-1)))
+        # if use LC solver
+        # return self.fc(x)
 
     def reset(self):
         pass
 
     def cal_prob(self, x, path_prob):
-        Q = self.forward()
+        Q = self.forward(x)
         #Q = Q.expand((self.args.batch_size, self.args.output_dim))
         Q = Q.expand((path_prob.size()[0], self.args.output_dim))
         return([[path_prob, Q]])
@@ -96,6 +124,7 @@ class LeafNode():
 class SoftDecisionTree(nn.Module):
 
     def __init__(self, args):
+        
         super(SoftDecisionTree, self).__init__()
         self.args = args
         self.root = InnerNode(1, self.args)
@@ -104,6 +133,7 @@ class SoftDecisionTree(nn.Module):
         self.test_acc = []
         self.define_extras(self.args.batch_size)
         self.best_accuracy = 0.0
+        self.savedir = self.args.modelname
 
     def define_extras(self, batch_size):
         ##define target_onehot and path_prob_init batch size, because these need to be defined according to batch size, which can be differ
@@ -123,11 +153,14 @@ class SoftDecisionTree(nn.Module):
         return node()
     '''        
     def cal_loss(self, x, y):
+        
         batch_size = y.size()[0]
         leaf_accumulator = self.root.cal_prob(x, self.path_prob_init)
         loss = 0.
         max_prob = [-1. for _ in range(batch_size)]
         max_Q = [torch.zeros(self.args.output_dim) for _ in range(batch_size)]
+        
+        # collect the full path 
         for (path_prob, Q) in leaf_accumulator:
             TQ = torch.bmm(y.view(batch_size, 1, self.args.output_dim), torch.log(Q).view(batch_size, self.args.output_dim, 1)).view(-1,1)
             loss += path_prob * TQ
@@ -146,6 +179,7 @@ class SoftDecisionTree(nn.Module):
         return(-loss + C, output) ## -log(loss) will always output non, because loss is always below zero. I suspect this is the mistake of the paper?
 
     def collect_parameters(self):
+        
         nodes = [self.root]
         self.module_list = nn.ModuleList()
         self.param_list = nn.ParameterList()
@@ -154,18 +188,24 @@ class SoftDecisionTree(nn.Module):
             if node.leaf:
                 param = node.param
                 self.param_list.append(param)
-            else:
                 fc = node.fc
+                self.module_list.append(fc)
+            else:
+                # fc = node.fc
+                net = node._net
                 beta = node.beta
                 nodes.append(node.right)
                 nodes.append(node.left)
                 self.param_list.append(beta)
-                self.module_list.append(fc)
+                # self.module_list.append(fc)
+                self.module_list.append(net)
 
     def train_(self, train_loader, epoch):
+        
         self.train()
         self.define_extras(self.args.batch_size)
         for batch_idx, (data, target) in enumerate(train_loader):
+            
             correct = 0
             if self.args.cuda:
                 data, target = data.cuda(), target.cuda()
@@ -176,32 +216,98 @@ class SoftDecisionTree(nn.Module):
             data = data.view(batch_size,-1)
             ##convert int target to one-hot vector
             data = Variable(data)
-            if not batch_size == self.args.batch_size: #because we have to initialize parameters for batch_size, tensor not matches with batch size cannot be trained
+            #because we have to initialize parameters for batch_size, tensor not matches with batch size cannot be trained
+            if not batch_size == self.args.batch_size: 
                 self.define_extras(batch_size)
             self.target_onehot.data.zero_()            
+            
             self.target_onehot.scatter_(1, target_, 1.)
             self.optimizer.zero_grad()
-
+        
+            # print("debug cal_loss")
+            # print(batch_size)
+            # print(data.shape)
+            # print(self.weight.shape)
             loss, output = self.cal_loss(data, self.target_onehot)
             #loss.backward(retain_variables=True)
             loss.backward()
+            # print(loss)
             self.optimizer.step()
             pred = output.data.max(1)[1] # get the index of the max log-probability
-            correct += pred.eq(target.data).cpu().sum()
-            accuracy = 100. * correct / len(data)
-
+            pred = pred.cpu()
+            targetdata = target.data.cpu()
+            # debug
+            # print("debug train")
+            # print(pred, pred.shape)
+            # print(targetdata, targetdata.shape)
+            correcttmp = pred.eq(targetdata.squeeze())
+            # print("correct:", correcttmp)
+            correcttmp = correcttmp.sum()
+            # print("correct:", correcttmp)
+            # correct += pred.eq(target.data).cpu().sum()
+            # correct += correcttmp
+            # print("correct:", correct)
+            # print("len data", len(data))
+            accuracy = 100. * correcttmp / len(data)
+            
+            # print("batch idx:", batch_idx)
+            # print("log_interval", self.args.log_interval)
             if batch_idx % self.args.log_interval == 0:
+                # print(loss.data)
+                # print(loss.data[0])
                 print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}, Accuracy: {}/{} ({:.4f}%)'.format(
                     epoch, batch_idx * len(data), len(train_loader.dataset),
-                    100. * batch_idx / len(train_loader), loss.data[0],
-                    correct, len(data),
+                    100. * batch_idx / len(train_loader), loss.data,
+                    correcttmp, len(data),
                     accuracy))
 
-    def test_(self, test_loader, epoch):
+    def test_(self, test_loader, mode = "full"):
         self.eval()
         self.define_extras(self.args.batch_size)
         test_loss = 0
         correct = 0
+        y_preds = []
+        y_test = []
+        for data, target in test_loader:
+            if self.args.cuda:
+                data, target = data.cuda(), target.cuda()
+
+            target = Variable(target)
+            target_ = target.view(-1,1)
+            batch_size = target_.size()[0]
+            data = data.view(batch_size,-1)
+            ##convert int target to one-hot vector
+            data = Variable(data)
+            if not batch_size == self.args.batch_size: #because we have to initialize parameters for batch_size, tensor not matches with batch size cannot be trained
+                self.define_extras(batch_size)
+            self.target_onehot.data.zero_()     
+            
+            self.target_onehot.scatter_(1, target_, 1.)
+            _, output = self.cal_loss(data, self.target_onehot)
+            pred = output.data.max(1)[1] # get the index of the max log-probability
+            pred = pred.cpu()
+            targetdata = target.data.cpu()
+            correct += pred.eq(targetdata.squeeze()).sum()
+            
+        accuracy = 100. * correct / len(test_loader.dataset)
+        print('\nTest set: Accuracy: {}/{} ({:.4f}%)\n'.format(
+            correct, len(test_loader.dataset),
+            accuracy))
+        self.test_acc.append(accuracy)
+
+        if accuracy > self.best_accuracy:
+            self.save_best('./result/')
+            self.best_accuracy = accuracy
+        
+    
+    def inference(self, test_loader):
+                
+        self.eval()
+        self.define_extras(self.args.batch_size)
+        test_loss = 0
+        correct = 0
+        y_preds = []
+        y_test = []
         for data, target in test_loader:
             if self.args.cuda:
                 data, target = data.cuda(), target.cuda()
@@ -213,26 +319,30 @@ class SoftDecisionTree(nn.Module):
             data = Variable(data)
             if not batch_size == self.args.batch_size: #because we have to initialize parameters for batch_size, tensor not matches with batch size cannot be trained
                 self.define_extras(batch_size)
-            self.target_onehot.data.zero_()            
+            self.target_onehot.data.zero_()     
+            
             self.target_onehot.scatter_(1, target_, 1.)
+        
+            # this is a full path inference
             _, output = self.cal_loss(data, self.target_onehot)
             pred = output.data.max(1)[1] # get the index of the max log-probability
             correct += pred.eq(target.data).cpu().sum()
+            
+            y_preds.append(output.data)
+            y_test.append(target.data)
         accuracy = 100. * correct / len(test_loader.dataset)
         print('\nTest set: Accuracy: {}/{} ({:.4f}%)\n'.format(
             correct, len(test_loader.dataset),
             accuracy))
-        self.test_acc.append(accuracy)
-
-        if accuracy > self.best_accuracy:
-            self.save_best('./result')
-            self.best_accuracy = accuracy
-
+        
+        return y_preds, y_test
+        
     def save_best(self, path):
-        try:
-            os.makedirs('./result')
-        except:
-            print('directory ./result already exists')
-
-        with open(os.path.join(path, 'best_model.pkl'), 'wb') as output_file:
+        
+        path = path + self.savedir
+        # path = path + "run1"
+        os.makedirs(path, exist_ok= True)
+        print("saving best model at", path)
+        with open(path + '/best_model.pkl', 'wb') as output_file:
+            
             pickle.dump(self, output_file)
