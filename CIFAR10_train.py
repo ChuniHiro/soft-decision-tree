@@ -53,11 +53,11 @@ from model import SoftDecisionTree
 from torch.utils.data import Dataset, DataLoader
 
 
-featname = "./model/feat_train_20K+test_dft=1024.pkl"
+featname = "./model/feat_train_200K+test_dft=512.pkl"
 feattraintmp,feattesttmp = pickle.load(open(featname ,'rb'))
 print("feature loaded at ", featname)
 
-yname = "./model/y_train_20K+test.pkl"
+yname = "./model/y_train_200K+test.pkl"
 y_train_200K, y_test, = pickle.load(open(yname,'rb'))
 print("label loaded at ", yname)
 

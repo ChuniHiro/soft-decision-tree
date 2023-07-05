@@ -2,3 +2,5 @@ torch
 numpy
 scikit-image
 numba
+scikit-learn
+tensorflow
